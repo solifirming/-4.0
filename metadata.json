@@ -1,0 +1,6 @@
+{
+  "name": "Birthday Wishes",
+  "description": "一个精美复古的像素风多节日主题祝福互动网页工坊，支持生日、中秋节、七夕节、新春年节、圣诞节与毕业季，具备专属主题BGM、动态像素中央视觉、打字机祝福与分享生成功能。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
