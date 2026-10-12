@@ -82,6 +82,15 @@ app.get('/api/cards/:id', (req, res) => {
   res.json({ success: true, card });
 });
 
+app.get('/download-code', (req, res) => {
+  const zipPath = path.join(process.cwd(), 'project_code.zip');
+  if (fs.existsSync(zipPath)) {
+    res.download(zipPath, 'pixelbless-code.zip');
+  } else {
+    res.status(404).send('Not found');
+  }
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
