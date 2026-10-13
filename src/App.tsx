@@ -29,6 +29,7 @@ import {
 import CanvasEffects from './components/CanvasEffects';
 import Envelope from './components/Envelope';
 import PhotoEnvelope from './components/PhotoEnvelope';
+import { enqueueCardSave } from './cardSaveQueue';
 import MusicPlayer, { MusicPlayerRef } from './components/MusicPlayer';
 import PixelMascotCreator, { MascotConfig } from './components/PixelMascotCreator';
 import PixelBirthdayCake from './components/PixelBirthdayCake';
@@ -411,11 +412,7 @@ export default function App() {
       localStorage.setItem(`pixel_birthday_cache_latest`, JSON.stringify(cardPayload));
     } catch(e) {}
 
-    fetch('/api/cards', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cardPayload)
-    }).then(async res => { if (!res.ok) throw new Error(`Cloud card save failed (HTTP ${res.status}): ${await res.text()}`); }).catch(err => { console.error('Failed to auto-sync card:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
+    enqueueCardSave(cardId, cardPayload).catch(err => { console.error('Cloud card save failed:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
   };
 
   const handleStartIntro = () => {
@@ -646,11 +643,7 @@ export default function App() {
     }
 
     // 2. Sync to cloud API
-    fetch('/api/cards', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cardPayload)
-    }).then(async res => { if (!res.ok) throw new Error(`Cloud card save failed (HTTP ${res.status}): ${await res.text()}`); }).catch(err => { console.error('Failed to auto-sync card:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
+    enqueueCardSave(cardId, cardPayload).catch(err => { console.error('Cloud card save failed:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
   }, [selectedFestivalId, birthdayName, birthdayAge, wishesList, selectedThemeIndex, activeMascotId, mascotConfig, customTitle, customParagraphs, customSignature, customDate, customThemeNames]);
 
     // Handles custom mascot interaction

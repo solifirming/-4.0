@@ -7,6 +7,7 @@ import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Camera, Sparkles, X, ChevronLeft, ChevronRight, Upload, RotateCcw, Heart, Eye, Share2, Copy, Check, Plus } from 'lucide-react';
 import { MemoryPhoto } from '../types';
+import { enqueueCardSave } from '../cardSaveQueue';
 import {
   Photo1Chapter22,
   Photo2SnowGirl,
@@ -50,7 +51,7 @@ export default function PhotoEnvelope({
       const saved = localStorage.getItem(`${STORAGE_KEY}_${cardId}`) || localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length === 5) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           return sanitizePhotos(parsed);
         }
       }
@@ -62,78 +63,61 @@ export default function PhotoEnvelope({
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploadTargetIndex, setUploadTargetIndex] = useState<number | null>(null);
-  const isFirstRender = useRef(true);
-  const hasFetchedInitialData = useRef(false);
+  const userChangedPhotos = useRef(false);
+  const [photosHydrated, setPhotosHydrated] = useState(false);
+  const [photoSaveStatus, setPhotoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // On mount: Fetch card from server if available (e.g. ?card=xxx or latest)
   const isSharedView = new URLSearchParams(window.location.search).get('shared') === '1';
 
+  // Hydrate from the card-specific cloud source before accepting automatic saves.
   React.useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const cardId = urlParams.get('card');
-
-    const fetchUrl = cardId ? `/api/cards/${cardId}` : '/api/cards/latest';
-
-    fetch(fetchUrl)
-      .then(res => res.json())
+    let cancelled = false;
+    const id = new URLSearchParams(window.location.search).get('card');
+    const fetchUrl = id ? `/api/cards/${encodeURIComponent(id)}` : '/api/cards/latest';
+    fetch(fetchUrl, { cache: 'no-store' })
+      .then(async res => { if (!res.ok) throw Error(`Photo load HTTP ${res.status}`); return res.json(); })
       .then((data: any) => {
-        if (data && data.success && data.card && Array.isArray(data.card.photos)) {
-          const freshPhotos = sanitizePhotos(data.card.photos);
-          setPhotos(freshPhotos);
-          try {
-            localStorage.setItem(`${STORAGE_KEY}_${cardId}`, JSON.stringify(freshPhotos));
-          } catch (e) {}
+        if (cancelled || userChangedPhotos.current) return;
+        if (data?.success && Array.isArray(data.card?.photos)) {
+          const fresh = sanitizePhotos(data.card.photos);
+          setPhotos(fresh);
+          try { localStorage.setItem(`${STORAGE_KEY}_${id || 'latest'}`, JSON.stringify(fresh)); } catch {}
         }
       })
-      .catch(err => console.log('Loaded photos fallback:', err))
-      .finally(() => {
-        hasFetchedInitialData.current = true;
-      });
+      .catch(err => console.warn('Cloud photo read unavailable; using local fallback:', err))
+      .finally(() => { if (!cancelled) setPhotosHydrated(true); });
+    return () => { cancelled = true; };
   }, []);
 
-  // Save photos state to localStorage and sync to server on user change
+  // Only user edits save. Server hydration must never overwrite the cloud.
   React.useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      return;
+    if (!photosHydrated || !userChangedPhotos.current || isSharedView) return;
+    userChangedPhotos.current = false;
+    const params = new URLSearchParams(window.location.search);
+    let id = params.get('card');
+    if (!id) {
+      id = `card_${Date.now()}`;
+      try { window.history.replaceState({}, '', `?card=${id}`); } catch {}
     }
-
-    // Protect against race condition: don't sync back if we haven't loaded the initial data yet!
-    // Otherwise a prop change from App.tsx will trigger a save with default photos, overwriting the server.
-    if (!hasFetchedInitialData.current || isSharedView) {
-      return;
-    }
-
-    const urlParams = new URLSearchParams(window.location.search);
-    let cardId = urlParams.get('card');
-    if (!cardId) {
-      cardId = `card_${Date.now()}`;
-      try {
-        window.history.replaceState({}, '', `?card=${cardId}`);
-      } catch (err) {}
-    }
-    
     try {
-      localStorage.setItem(`${STORAGE_KEY}_${cardId}`, JSON.stringify(photos));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(photos)); // fallback for generic
-    } catch (e) {
-      console.error('Failed to save photos to localStorage:', e);
-    }
-
-    fetch('/api/cards', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        id: cardId,
-        photos: photos
-      })
-    }).then(async res => { if (!res.ok) throw new Error(`Cloud photo save failed (HTTP ${res.status}): ${await res.text()}`); }).catch(err => { console.error('Failed to auto-sync photos:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
-  }, [photos]);
+      localStorage.setItem(`${STORAGE_KEY}_${id}`, JSON.stringify(photos));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(photos));
+    } catch (err) { console.warn('Local photo backup failed', err); }
+    setPhotoSaveStatus('saving');
+    enqueueCardSave(id, { id, photos })
+      .then(() => setPhotoSaveStatus('saved'))
+      .catch(err => {
+        setPhotoSaveStatus('error');
+        window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) }));
+      });
+  }, [photos, photosHydrated, isSharedView]);
 
   // Reset photos back to default
   const handleResetPhotos = (e: React.MouseEvent) => {
     e.stopPropagation();
     playClickSound();
+    userChangedPhotos.current = true;
     setPhotos(initialPhotos);
     try {
       localStorage.removeItem(STORAGE_KEY);
@@ -191,6 +175,7 @@ export default function PhotoEnvelope({
       URL.revokeObjectURL(objectUrl);
       
       if (resultUrl) {
+        userChangedPhotos.current = true;
         setPhotos(prev => {
           const next = [...prev];
           if (index === -1) {
@@ -240,6 +225,7 @@ export default function PhotoEnvelope({
       setSelectedPhotoIndex(selectedPhotoIndex - 1);
     }
 
+    userChangedPhotos.current = true;
     setPhotos(prev => {
       const next = [...prev];
       next.splice(index, 1);
@@ -285,6 +271,11 @@ export default function PhotoEnvelope({
   return (
     <div className="w-full bg-[#1A0829]/90 border-4 border-[#FFE8F5] p-4 sm:p-5 flex flex-col items-center gap-4 relative shadow-2xl">
       
+      {!isSharedView && photoSaveStatus !== 'idle' && (
+        <span role="status" className="text-[10px] text-[#FFE8F5]">
+          {photoSaveStatus === 'saving' ? '照片保存中…' : photoSaveStatus === 'saved' ? '照片已保存到云端' : '云端保存失败，请稍后重试'}
+        </span>
+      )}
       {/* Hidden file input for custom image upload */}
       <input
         ref={fileInputRef}
