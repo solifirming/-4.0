@@ -415,7 +415,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cardPayload)
-    }).catch(err => console.error('Failed to auto-sync card:', err));
+    }).then(async res => { if (!res.ok) throw new Error(`Cloud card save failed (HTTP ${res.status}): ${await res.text()}`); }).catch(err => { console.error('Failed to auto-sync card:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
   };
 
   const handleStartIntro = () => {
@@ -650,7 +650,7 @@ export default function App() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cardPayload)
-    }).catch(err => console.error('Failed to auto-sync card:', err));
+    }).then(async res => { if (!res.ok) throw new Error(`Cloud card save failed (HTTP ${res.status}): ${await res.text()}`); }).catch(err => { console.error('Failed to auto-sync card:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
   }, [selectedFestivalId, birthdayName, birthdayAge, wishesList, selectedThemeIndex, activeMascotId, mascotConfig, customTitle, customParagraphs, customSignature, customDate, customThemeNames]);
 
     // Handles custom mascot interaction

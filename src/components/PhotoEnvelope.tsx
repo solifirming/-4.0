@@ -127,7 +127,7 @@ export default function PhotoEnvelope({
         id: cardId,
         photos: photos
       })
-    }).catch(err => console.error('Failed to auto-sync photos:', err));
+    }).then(async res => { if (!res.ok) throw new Error(`Cloud photo save failed (HTTP ${res.status}): ${await res.text()}`); }).catch(err => { console.error('Failed to auto-sync photos:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
   }, [photos]);
 
   // Reset photos back to default
