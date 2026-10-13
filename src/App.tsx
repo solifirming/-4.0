@@ -36,8 +36,9 @@ import PixelBirthdayCake from './components/PixelBirthdayCake';
 import { FestivalCenterpiece } from './components/FestivalCenterpiece';
 import ThemeDecorations from './components/ThemeDecorations';
 import { FESTIVAL_CONFIGS, FESTIVAL_LIST } from './festivalData';
-import { FestivalId } from './types';
-import { BLESSING_THEMES, DEFAULT_BIRTHDAY_IMAGE, CLICK_SOUND_URL, DEFAULT_MEMORY_PHOTOS } from './data';
+import { FestivalId, MemoryPhoto } from './types';
+import { normalizePhotos } from './photoState';
+import { BLESSING_THEMES, DEFAULT_BIRTHDAY_IMAGE, CLICK_SOUND_URL } from './data';
 
 const FESTIVAL_BG_GRADIENTS: Record<FestivalId, string> = {
   birthday: 'radial-gradient(circle at 50% 20%, #4a1963 0%, #260d3d 50%, #140524 100%)',
@@ -100,11 +101,18 @@ export default function App() {
   const [isEditingName, setIsEditingName] = useState(false);
   const [tempName, setTempName] = useState('最特别的孩子');
 
-  const isFirstRender = useRef(true);
-  const hasFetchedInitialData = useRef(false);
+  const [photos, setPhotos] = useState<MemoryPhoto[]>([]);
+  const [cardLoaded, setCardLoaded] = useState(false);
+  const [photosUploading, setPhotosUploading] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [shareError, setShareError] = useState('');
+  const [sharing, setSharing] = useState(false);
+  const loadedPayload = useRef('');
+  const saveRevision = useRef(0);
 
   // Load saved card data from server on initial mount
   useEffect(() => {
+    const controller = new AbortController();
     const urlParams = new URLSearchParams(window.location.search);
     const cardId = urlParams.get('card') || 'latest';
     const isShared = urlParams.get('shared') === '1';
@@ -122,8 +130,9 @@ export default function App() {
     // 1. Local-First Caching: Instantly load configuration from localStorage
     try {
       const cached = localStorage.getItem(`pixel_birthday_cache_${cardId}`);
-      if (cached) {
+      if (cached && !isShared) {
         const parsed = JSON.parse(cached);
+        setPhotos(normalizePhotos(parsed.photos));
         if (parsed.festivalId && FESTIVAL_CONFIGS[parsed.festivalId as FestivalId]) {
           setSelectedFestivalId(parsed.festivalId as FestivalId);
         }
@@ -150,7 +159,7 @@ export default function App() {
         if (parsed.customSignature !== undefined) setCustomSignature(parsed.customSignature);
         if (parsed.customDate !== undefined) setCustomDate(parsed.customDate);
         if (parsed.customThemeNames !== undefined) setCustomThemeNames(parsed.customThemeNames);
-        if (Array.isArray(parsed.wishes) && parsed.wishes.length > 0) {
+        if (Array.isArray(parsed.wishes)) {
           setWishesList(parsed.wishes);
         }
       }
@@ -159,10 +168,13 @@ export default function App() {
     }
 
 
-    fetch(`/api/cards/${cardId}`)
-      .then(res => res.json())
+    fetch('/api/cards/' + encodeURIComponent(cardId), { cache: 'no-store', signal: controller.signal })
+      .then(async res => { if (!res.ok) throw new Error('卡片读取失败'); return res.json(); })
       .then((data: any) => {
+        if (!data?.success) throw new Error('卡片读取失败');
+        if (isShared && !data.card) throw new Error('分享卡片不存在');
         if (data && data.success && data.card) {
+          setPhotos(normalizePhotos(data.card.photos));
           if (data.card.festivalId && FESTIVAL_CONFIGS[data.card.festivalId as FestivalId]) {
             setSelectedFestivalId(data.card.festivalId as FestivalId);
           }
@@ -189,7 +201,7 @@ export default function App() {
           if (data.card.customSignature !== undefined) setCustomSignature(data.card.customSignature);
           if (data.card.customDate !== undefined) setCustomDate(data.card.customDate);
           if (data.card.customThemeNames !== undefined) setCustomThemeNames(data.card.customThemeNames);
-          if (Array.isArray(data.card.wishes) && data.card.wishes.length > 0) {
+          if (Array.isArray(data.card.wishes)) {
             setWishesList(data.card.wishes);
           }
           
@@ -198,11 +210,10 @@ export default function App() {
             localStorage.setItem(`pixel_birthday_cache_${cardId}`, JSON.stringify(data.card));
           } catch(e) {}
         }
+        setCardLoaded(true);
       })
-      .catch(err => console.log('Notice: using default initial parameters', err))
-      .finally(() => {
-        hasFetchedInitialData.current = true;
-      });
+      .catch(() => { if (!controller.signal.aborted) setShareError('云端卡片读取失败，请刷新后重试。'); });
+    return () => controller.abort();
   }, []);
 
   
@@ -365,54 +376,43 @@ export default function App() {
     clickAudioRef.current.play().catch(() => {});
   };
 
-  const handleShareLink = () => {
+  const getCardPayload = (id: string) => ({
+    id, festivalId: selectedFestivalId, name: birthdayName, age: birthdayAge,
+    photos, wishes: wishesList, themeIndex: selectedThemeIndex, activeMascotId,
+    mascotConfig, customTitle, customParagraphs, customSignature, customDate, customThemeNames
+  });
+  const getCardId = () => {
+    const params = new URLSearchParams(window.location.search);
+    let id = params.get('card');
+    if (!id || id === 'latest') {
+      id = 'card_' + crypto.randomUUID();
+      params.set('card', id);
+      window.history.replaceState({}, '', '?' + params.toString());
+    }
+    return id;
+  };
+  const handleShareLink = async () => {
+    if (!cardLoaded || photosUploading || sharing) return;
     playClickSound();
-    
-    const urlParams = new URLSearchParams(window.location.search);
-    let cardId = urlParams.get('card');
-    if (!cardId) {
-      cardId = `card_${Date.now()}`;
-      try {
-        window.history.replaceState({}, '', `?card=${cardId}`);
-      } catch (err) {}
-    }
-    
-    const shareUrl = `${window.location.origin}${window.location.pathname}?card=${cardId}&festival=${selectedFestivalId}&shared=1`;
-
-    let isCopied = false;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      try {
-        navigator.clipboard.writeText(shareUrl);
-        isCopied = true;
-      } catch (err) {
-        console.warn('Clipboard write failed:', err);
-      }
-    }
-
-    setShareModal({ isOpen: true, url: shareUrl, copied: isCopied });
-
-    const cardPayload = {
-      id: cardId,
-      festivalId: selectedFestivalId,
-      name: birthdayName,
-      age: birthdayAge,
-      wishes: wishesList,
-      themeIndex: selectedThemeIndex,
-      activeMascotId,
-      mascotConfig,
-      customTitle,
-      customParagraphs,
-      customSignature,
-      customDate,
-      customThemeNames
-    };
-    
+    setSharing(true);
+    setShareError('');
     try {
-      localStorage.setItem(`pixel_birthday_cache_${cardId}`, JSON.stringify(cardPayload));
-      localStorage.setItem(`pixel_birthday_cache_latest`, JSON.stringify(cardPayload));
-    } catch(e) {}
-
-    enqueueCardSave(cardId, cardPayload).catch(err => { console.error('Cloud card save failed:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
+      const cardId = getCardId();
+      const cardPayload = getCardPayload(cardId);
+      // 重试时提交完整快照，确保之前失败的照片保存也包含在分享中。
+      await enqueueCardSave(cardId, cardPayload);
+      const response = await fetch('/api/cards/' + encodeURIComponent(cardId), { cache: 'no-store' });
+      if (!response.ok) throw new Error('无法确认分享卡片');
+      const result = await response.json();
+      if (!result?.success || JSON.stringify(result.card?.photos) !== JSON.stringify(photos))
+        throw new Error('服务器照片与当前照片不一致，请重试');
+      const shareUrl = window.location.origin + window.location.pathname + '?card=' + encodeURIComponent(cardId) + '&festival=' + selectedFestivalId + '&shared=1';
+      let copied = false;
+      try { await navigator.clipboard.writeText(shareUrl); copied = true; } catch {}
+      setShareModal({ isOpen: true, url: shareUrl, copied });
+    } catch (error) {
+      setShareError(error instanceof Error ? error.message : '保存失败，请重试分享');
+    } finally { setSharing(false); }
   };
 
   const handleStartIntro = () => {
@@ -597,54 +597,22 @@ export default function App() {
     }, 1200);
   };
 
-// Save state to server on user change
+  // 云端读取完成后统一保存整张卡片；读取本身不触发写回。
   useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      return;
-    }
-
-    // Protect against race condition: don't sync back if we haven't loaded the initial data yet!
-    if (!hasFetchedInitialData.current || isSharedView) {
-      return;
-    }
-
-    const urlParams = new URLSearchParams(window.location.search);
-    let cardId = urlParams.get('card');
-    if (!cardId) {
-      cardId = `card_${Date.now()}`;
-      try {
-        window.history.replaceState({}, '', `?card=${cardId}`);
-      } catch (err) {}
-    }
-
-    const cardPayload = {
-      id: cardId,
-      festivalId: selectedFestivalId,
-      name: birthdayName,
-      age: birthdayAge,
-      wishes: wishesList,
-      themeIndex: selectedThemeIndex,
-      activeMascotId: activeMascotId,
-      mascotConfig: mascotConfig,
-      customTitle,
-      customParagraphs,
-      customSignature,
-      customDate,
-      customThemeNames
-    };
-
-    // 1. Instantly save to local cache to survive network drops
-    try {
-      localStorage.setItem(`pixel_birthday_cache_${cardId}`, JSON.stringify(cardPayload));
-      localStorage.setItem(`pixel_birthday_cache_latest`, JSON.stringify(cardPayload));
-    } catch (e) {
-      console.error('Failed to update local cache', e);
-    }
-
-    // 2. Sync to cloud API
-    enqueueCardSave(cardId, cardPayload).catch(err => { console.error('Cloud card save failed:', err); window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) })); });
-  }, [selectedFestivalId, birthdayName, birthdayAge, wishesList, selectedThemeIndex, activeMascotId, mascotConfig, customTitle, customParagraphs, customSignature, customDate, customThemeNames]);
+    if (!cardLoaded || isSharedView) return;
+    const snapshot = JSON.stringify(getCardPayload(''));
+    if (!loadedPayload.current) { loadedPayload.current = snapshot; return; }
+    if (loadedPayload.current === snapshot) return;
+    loadedPayload.current = snapshot;
+    const cardId = getCardId();
+    const payload = getCardPayload(cardId);
+    const revision = ++saveRevision.current;
+    try { localStorage.setItem('pixel_birthday_cache_' + cardId, JSON.stringify(payload)); } catch {}
+    setSaveStatus('saving');
+    enqueueCardSave(cardId, payload)
+      .then(() => { if (revision === saveRevision.current) setSaveStatus('saved'); })
+      .catch(() => { if (revision === saveRevision.current) setSaveStatus('error'); });
+  }, [cardLoaded, photos, selectedFestivalId, birthdayName, birthdayAge, wishesList, selectedThemeIndex, activeMascotId, mascotConfig, customTitle, customParagraphs, customSignature, customDate, customThemeNames]);
 
     // Handles custom mascot interaction
   const triggerMascotPhrase = (id: string, phrase: string) => {
@@ -1864,7 +1832,11 @@ export default function App() {
               <PhotoEnvelope
                 birthdayName={birthdayName}
                 birthdayAge={birthdayAge}
-                initialPhotos={DEFAULT_MEMORY_PHOTOS}
+                photos={photos}
+                setPhotos={setPhotos}
+                disabled={!cardLoaded || sharing}
+                onUploadingChange={setPhotosUploading}
+                photoSaveStatus={saveStatus}
                 playClickSound={playClickSound}
                 wishesList={wishesList}
                 selectedThemeIndex={selectedThemeIndex}
@@ -2095,14 +2067,17 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleShareLink}
+                  disabled={!cardLoaded || photosUploading || sharing}
                   className="w-full py-4 bg-[#FF8FA3] border-4 border-[#FFE8F5] text-[#24133c] text-sm font-pixel font-bold tracking-wider hover:bg-white active:scale-[0.98] active:translate-y-1 cursor-pointer shadow-lg flex items-center justify-center gap-2 transition-transform duration-75 touch-manipulation select-none"
                   style={{ boxShadow: '0 6px 0 #7B5EA7' }}
                 >
                   <Share2 className="w-5 h-5" />
-                  <span>生成并复制专属分享链接 (SHARE LINK)</span>
+                  <span>{sharing ? '正在保存并确认分享…' : photosUploading ? '正在处理图片…' : '生成并复制专属分享链接 (SHARE LINK)'}</span>
                 </button>
               </motion.div>
             )}
+
+            {shareError && <p role="alert" className="text-sm text-[#FF8FA3] text-center">{shareError}</p>}
 
             {/* Aesthetic bottom retro footer credits */}
             <div className="text-center text-[9px] text-[#C9A9E9] tracking-widest flex flex-col items-center justify-center gap-2 pt-3 border-t-2 border-dotted border-[#7B5EA7]/20 mt-3 leading-normal font-mono font-bold">
@@ -2217,8 +2192,9 @@ export default function App() {
                       onClick={() => {
                         playClickSound();
                         if (navigator.clipboard && navigator.clipboard.writeText) {
-                          navigator.clipboard.writeText(shareModal.url);
-                          setShareModal(prev => ({ ...prev, copied: true }));
+                          navigator.clipboard.writeText(shareModal.url)
+                            .then(() => setShareModal(prev => ({ ...prev, copied: true })))
+                            .catch(() => setShareError('复制失败，请手动复制链接'));
                         }
                       }}
                       className="w-full py-2.5 mt-2 bg-[#FF8FA3] border-2 border-[#FFE8F5] text-[#24133c] text-xs font-bold font-pixel cursor-pointer hover:bg-white active:translate-y-0.5 shadow-md flex items-center justify-center gap-1.5"

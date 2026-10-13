@@ -10,7 +10,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id))
     return res.status(400).json({ success: false, error: 'invalid card id' });
   try {
-    const blob = await get(`cards/${id}.json`, { access: 'private' });
+    const blob = await get(`cards/${id}.json`, { access: 'private', useCache: false });
     const card = blob ? JSON.parse(await new Response(blob.stream).text()) : null;
     return res.status(200).json({ success: true, card });
   } catch (error) {

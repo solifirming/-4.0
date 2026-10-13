@@ -5,7 +5,7 @@ type ApiResponse = { status(code: number): ApiResponse; setHeader(name: string, 
 const validId = (id: string) => /^[a-zA-Z0-9_-]{1,100}$/.test(id);
 const pathFor = (id: string) => `cards/${id}.json`;
 async function readCard(id: string): Promise<Record<string, unknown> | null> {
-  const blob = await get(pathFor(id), { access: 'private' });
+  const blob = await get(pathFor(id), { access: 'private', useCache: false });
   return blob ? JSON.parse(await new Response(blob.stream).text()) : null;
 }
 async function writeCard(id: string, card: Record<string, unknown>) {

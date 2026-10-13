@@ -78,7 +78,7 @@ app.get('/api/cards/latest', (req, res) => {
 app.get('/api/cards/:id', (req, res) => {
   const { id } = req.params;
   const db = loadCardsDB();
-  const card = db[id] || db['latest'] || null;
+  const card = db[id] || null;
   res.json({ success: true, card });
 });
 

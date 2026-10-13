@@ -7,7 +7,7 @@ export function json(data: unknown, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 export async function readCard(id: string): Promise<Record<string, any> | null> {
-  const blob = await get(cardPath(id), { access: 'private' });
+  const blob = await get(cardPath(id), { access: 'private', useCache: false });
   if (!blob) return null;
   return JSON.parse(await new Response(blob.stream).text());
 }

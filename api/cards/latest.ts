@@ -6,7 +6,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse) {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'GET') return res.status(405).json({ success: false, error: 'method not allowed' });
   try {
-    const blob = await get('cards/latest.json', { access: 'private' });
+    const blob = await get('cards/latest.json', { access: 'private', useCache: false });
     const card = blob ? JSON.parse(await new Response(blob.stream).text()) : null;
     return res.status(200).json({ success: true, card });
   } catch (error) {

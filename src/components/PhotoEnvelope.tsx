@@ -7,7 +7,7 @@ import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Camera, Sparkles, X, ChevronLeft, ChevronRight, Upload, RotateCcw, Heart, Eye, Share2, Copy, Check, Plus } from 'lucide-react';
 import { MemoryPhoto } from '../types';
-import { enqueueCardSave } from '../cardSaveQueue';
+
 import {
   Photo1Chapter22,
   Photo2SnowGirl,
@@ -19,7 +19,11 @@ import {
 interface PhotoEnvelopeProps {
   birthdayName: string;
   birthdayAge: number;
-  initialPhotos: MemoryPhoto[];
+  photos: MemoryPhoto[];
+  setPhotos: React.Dispatch<React.SetStateAction<MemoryPhoto[]>>;
+  disabled: boolean;
+  onUploadingChange: (uploading: boolean) => void;
+  photoSaveStatus: 'idle' | 'saving' | 'saved' | 'error';
   playClickSound: () => void;
   wishesList?: string[];
   selectedThemeIndex?: number;
@@ -28,103 +32,18 @@ interface PhotoEnvelopeProps {
 export default function PhotoEnvelope({
   birthdayName,
   birthdayAge,
-  initialPhotos,
+  photos, setPhotos, disabled, onUploadingChange, photoSaveStatus,
   playClickSound,
   wishesList = [],
   selectedThemeIndex = 0
 }: PhotoEnvelopeProps) {
-  const STORAGE_KEY = 'pixel_birthday_user_photos_v2';
-
-  const sanitizePhotos = (list: MemoryPhoto[]) => {
-    if (!Array.isArray(list)) return initialPhotos;
-    return list.map((item, idx) => ({
-      ...item,
-      url: item.url || initialPhotos[idx]?.url || ''
-    }));
-  };
-
   const [isOpen, setIsOpen] = useState(false);
-  const [photos, setPhotos] = useState<MemoryPhoto[]>(() => {
-    try {
-      const urlParams = new URLSearchParams(window.location.search);
-      const cardId = urlParams.get('card') || 'latest';
-      const saved = localStorage.getItem(`${STORAGE_KEY}_${cardId}`) || localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return sanitizePhotos(parsed);
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load photos from localStorage:', e);
-    }
-    return initialPhotos;
-  });
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploadTargetIndex, setUploadTargetIndex] = useState<number | null>(null);
-  const userChangedPhotos = useRef(false);
-  const [photosHydrated, setPhotosHydrated] = useState(false);
-  const [photoSaveStatus, setPhotoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-
-  // On mount: Fetch card from server if available (e.g. ?card=xxx or latest)
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const isSharedView = new URLSearchParams(window.location.search).get('shared') === '1';
-
-  // Hydrate from the card-specific cloud source before accepting automatic saves.
-  React.useEffect(() => {
-    let cancelled = false;
-    const id = new URLSearchParams(window.location.search).get('card');
-    const fetchUrl = id ? `/api/cards/${encodeURIComponent(id)}` : '/api/cards/latest';
-    fetch(fetchUrl, { cache: 'no-store' })
-      .then(async res => { if (!res.ok) throw Error(`Photo load HTTP ${res.status}`); return res.json(); })
-      .then((data: any) => {
-        if (cancelled || userChangedPhotos.current) return;
-        if (data?.success && Array.isArray(data.card?.photos)) {
-          const fresh = sanitizePhotos(data.card.photos);
-          setPhotos(fresh);
-          try { localStorage.setItem(`${STORAGE_KEY}_${id || 'latest'}`, JSON.stringify(fresh)); } catch {}
-        }
-      })
-      .catch(err => console.warn('Cloud photo read unavailable; using local fallback:', err))
-      .finally(() => { if (!cancelled) setPhotosHydrated(true); });
-    return () => { cancelled = true; };
-  }, []);
-
-  // Only user edits save. Server hydration must never overwrite the cloud.
-  React.useEffect(() => {
-    if (!photosHydrated || !userChangedPhotos.current || isSharedView) return;
-    userChangedPhotos.current = false;
-    const params = new URLSearchParams(window.location.search);
-    let id = params.get('card');
-    if (!id) {
-      id = `card_${Date.now()}`;
-      try { window.history.replaceState({}, '', `?card=${id}`); } catch {}
-    }
-    try {
-      localStorage.setItem(`${STORAGE_KEY}_${id}`, JSON.stringify(photos));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(photos));
-    } catch (err) { console.warn('Local photo backup failed', err); }
-    setPhotoSaveStatus('saving');
-    enqueueCardSave(id, { id, photos })
-      .then(() => setPhotoSaveStatus('saved'))
-      .catch(err => {
-        setPhotoSaveStatus('error');
-        window.dispatchEvent(new CustomEvent('pixelbless-save-error', { detail: String(err) }));
-      });
-  }, [photos, photosHydrated, isSharedView]);
-
-  // Reset photos back to default
-  const handleResetPhotos = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    playClickSound();
-    userChangedPhotos.current = true;
-    setPhotos(initialPhotos);
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch (err) {
-      console.error(err);
-    }
-  };
 
   // Toggle Envelope open state
   const handleEnvelopeClick = () => {
@@ -132,81 +51,56 @@ export default function PhotoEnvelope({
     setIsOpen(prev => !prev);
   };
 
-  // Upload image handler
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>, index: number) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  // 按选择顺序压缩整批照片，全部成功后一次更新，避免异步完成顺序打乱照片。
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>, index: number) => {
+    const files = Array.from(e.target.files || []) as File[];
+    e.target.value = '';
+    if (!files.length || disabled || uploading || isSharedView) return;
+    setUploading(true);
+    onUploadingChange(true);
+    setUploadError('');
     playClickSound();
-    
-    // Create an image element to downscale the photo
-    const img = new Image();
-    const objectUrl = URL.createObjectURL(file);
-    
-    img.onload = () => {
-      // Calculate new dimensions (max 800x800 for envelope photos to save space)
-      let width = img.width;
-      let height = img.height;
-      const MAX_SIZE = 800;
-      
-      if (width > height) {
-        if (width > MAX_SIZE) {
-          height *= MAX_SIZE / width;
-          width = MAX_SIZE;
-        }
-      } else {
-        if (height > MAX_SIZE) {
-          width *= MAX_SIZE / height;
-          height = MAX_SIZE;
-        }
-      }
-      
-      // Draw to canvas and compress
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      
-      ctx.drawImage(img, 0, 0, width, height);
-      
-      // Get highly compressed JPEG (0.7 quality is plenty for pixel art aesthetic)
-      const resultUrl = canvas.toDataURL('image/jpeg', 0.7);
-      URL.revokeObjectURL(objectUrl);
-      
-      if (resultUrl) {
-        userChangedPhotos.current = true;
-        setPhotos(prev => {
-          const next = [...prev];
-          if (index === -1) {
-            next.push({
-              id: `custom_${Date.now()}`,
-              title: "我们的美好瞬间",
-              subtitle: "",
-              date: "",
-              description: "这一刻的美好，被永远定格。",
-              url: resultUrl,
-              isCustomCover: true
-            });
-          } else {
-            next[index] = {
-              ...next[index],
-              url: resultUrl,
-              isCustomCover: true
-            };
-          }
-          return next;
+    try {
+      const batch: MemoryPhoto[] = [];
+      for (const file of (index === -1 ? files : files.slice(0, 1))) {
+        if (!file.type.startsWith('image/')) throw new Error('请选择图片文件');
+        const url = await new Promise<string>((resolve, reject) => {
+          const img = new Image();
+          const objectUrl = URL.createObjectURL(file);
+          img.onload = () => {
+            try {
+              const scale = Math.min(1, 800 / Math.max(img.width, img.height));
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.round(img.width * scale));
+              canvas.height = Math.max(1, Math.round(img.height * scale));
+              const ctx = canvas.getContext('2d');
+              if (!ctx) throw new Error('无法处理图片');
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              resolve(canvas.toDataURL('image/jpeg', 0.7));
+            } catch (error) { reject(error); }
+            finally { URL.revokeObjectURL(objectUrl); }
+          };
+          img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('图片无法读取，请重新选择')); };
+          img.src = objectUrl;
         });
+        batch.push({ id: 'custom_' + crypto.randomUUID(), title: '我们的美好瞬间',
+          subtitle: '', date: '', description: '这一刻的美好，被永远定格。', url, isCustomCover: true });
       }
-    };
-    img.src = objectUrl;
+      setPhotos(prev => index === -1 ? [...prev, ...batch] : prev.map((photo, i) =>
+        i === index ? { ...photo, url: batch[0].url, isCustomCover: true } : photo));
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : '图片处理失败，请重新选择');
+    } finally { setUploading(false); onUploadingChange(false); }
   };
 
   const triggerUploadFor = (index: number, e: React.MouseEvent) => {
     e.stopPropagation();
     playClickSound();
+    if (disabled || uploading || isSharedView) return;
     setUploadTargetIndex(index);
     if (fileInputRef.current) {
+      // 打开系统选择框前立即设置，不能等待 React 下一次渲染才启用多选。
+      fileInputRef.current.multiple = index === -1;
       fileInputRef.current.value = '';
       fileInputRef.current.click();
     }
@@ -215,7 +109,7 @@ export default function PhotoEnvelope({
   const handleDeletePhoto = (index: number, e: React.MouseEvent) => {
     e.stopPropagation();
     playClickSound();
-    if (photos.length <= 1) return; // Must have at least 1 photo
+    if (disabled || uploading || isSharedView) return;
     
     // Close modal if we're deleting the currently viewed photo
     if (selectedPhotoIndex === index) {
@@ -225,7 +119,6 @@ export default function PhotoEnvelope({
       setSelectedPhotoIndex(selectedPhotoIndex - 1);
     }
 
-    userChangedPhotos.current = true;
     setPhotos(prev => {
       const next = [...prev];
       next.splice(index, 1);
@@ -235,7 +128,7 @@ export default function PhotoEnvelope({
 
   // Helper to render photo content
   const renderPhotoContent = (photo: MemoryPhoto, index: number) => {
-    const photoUrl = photo.url || initialPhotos[index]?.url || '';
+    const photoUrl = photo.url || '';
 
     if (photoUrl) {
       return (
@@ -276,11 +169,15 @@ export default function PhotoEnvelope({
           {photoSaveStatus === 'saving' ? '照片保存中…' : photoSaveStatus === 'saved' ? '照片已保存到云端' : '云端保存失败，请稍后重试'}
         </span>
       )}
+      {uploadError && <p role="alert" className="text-xs text-[#FF8FA3]">{uploadError}</p>}
+      {disabled && !isSharedView && <p role="status" className="text-xs text-[#FFE8F5]">正在读取云端卡片…</p>}
       {/* Hidden file input for custom image upload */}
       <input
         ref={fileInputRef}
         type="file"
         accept="image/*"
+        multiple={uploadTargetIndex === -1}
+        disabled={disabled || uploading}
         className="hidden"
         onChange={(e) => {
           if (uploadTargetIndex !== null) {
@@ -422,9 +319,11 @@ export default function PhotoEnvelope({
                       <div className="absolute -top-2.5 left-1/2 -translate-x-1/2 w-7 h-3 bg-[#FF8FA3]/80 border border-white skew-x-12 z-10" />
 
                       {/* Delete Button (visible on hover) */}
-                      {!isSharedView && photos.length > 1 && (
+                      {!isSharedView && (
                         <button
                           type="button"
+                          aria-label="删除照片"
+                          disabled={disabled || uploading}
                           onClick={(e) => handleDeletePhoto(index, e)}
                           className="absolute -top-2 -right-2 w-6 h-6 bg-[#25103D] border-2 border-[#FFE8F5] text-[#FFE8F5] flex items-center justify-center cursor-pointer hover:bg-[#FF8FA3] hover:text-[#25103D] z-20 opacity-0 group-hover:opacity-100 transition-opacity"
                         >
@@ -470,6 +369,7 @@ export default function PhotoEnvelope({
                       {/* Polaroid Caption */}
                       <div className="w-full text-center flex flex-col items-center pt-0.5">
                         {/* Direct Always-Visible Replace Button for Mobile/Touch */}
+                        {!isSharedView && (
                         <button
                           type="button"
                           onClick={(e) => triggerUploadFor(index, e)}
@@ -478,6 +378,7 @@ export default function PhotoEnvelope({
                           <Upload className="w-2.5 h-2.5" />
                           <span>更换此照片</span>
                         </button>
+                        )}
                       </div>
                     </motion.div>
                   );
@@ -495,7 +396,7 @@ export default function PhotoEnvelope({
                     <div className="w-10 h-10 bg-[#7B5EA7] rounded-full flex items-center justify-center text-[#FFE8F5] group-hover:bg-[#FF8FA3] group-hover:text-[#25103D] transition-colors">
                       <Plus className="w-5 h-5" />
                     </div>
-                    <span className="text-[10px] text-[#7B5EA7] font-pixel font-bold group-hover:text-[#FF8FA3] transition-colors">添加新照片</span>
+                    <span className="text-[10px] text-[#7B5EA7] font-pixel font-bold group-hover:text-[#FF8FA3] transition-colors">{uploading ? '正在处理图片…' : '添加照片（可多选）'}</span>
                   </motion.div>
                 )}
               </div>
@@ -565,6 +466,7 @@ export default function PhotoEnvelope({
                   <ChevronLeft className="w-3.5 h-3.5" />
                   <span>上一张</span>
                 </button>
+                {!isSharedView && <>
                 <button
                   type="button"
                   onClick={(e) => triggerUploadFor(selectedPhotoIndex, e)}
@@ -581,6 +483,7 @@ export default function PhotoEnvelope({
                   <X className="w-3.5 h-3.5" />
                   <span>删除</span>
                 </button>
+                </>}
                 <button
                   type="button"
                   onClick={() => {
