@@ -1,37 +1,42 @@
 import { get, put } from '@vercel/blob';
 
-const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
+type ApiRequest = { method?: string; body?: unknown; headers: Record<string, string | string[] | undefined> };
+type ApiResponse = { status(code: number): ApiResponse; setHeader(name: string, value: string): void; json(value: unknown): void };
 const validId = (id: string) => /^[a-zA-Z0-9_-]{1,100}$/.test(id);
+const pathFor = (id: string) => `cards/${id}.json`;
 async function readCard(id: string): Promise<Record<string, unknown> | null> {
-  const blob = await get(`cards/${id}.json`, { access: 'private' });
+  const blob = await get(pathFor(id), { access: 'private' });
   return blob ? JSON.parse(await new Response(blob.stream).text()) : null;
 }
 async function writeCard(id: string, card: Record<string, unknown>) {
-  await put(`cards/${id}.json`, JSON.stringify(card), {
+  await put(pathFor(id), JSON.stringify(card), {
     access: 'private', contentType: 'application/json', allowOverwrite: true,
   });
 }
-export default async function handler(request: Request): Promise<Response> {
-  if (request.method !== 'POST') return json({ success: false, error: 'method not allowed' }, 405);
+export default async function handler(req: ApiRequest, res: ApiResponse) {
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'method not allowed' });
   try {
-    if (Number(request.headers.get('content-length') || 0) > 3_500_000)
-      return json({ success: false, error: 'payload too large' }, 413);
-    const body: unknown = await request.json();
+    const rawLength = req.headers['content-length'];
+    const length = Number(Array.isArray(rawLength) ? rawLength[0] : rawLength || 0);
+    if (length > 3_500_000) return res.status(413).json({ success: false, error: 'payload too large' });
+    let body: unknown = req.body;
+    if (typeof body === 'string') body = JSON.parse(body);
     if (!body || typeof body !== 'object' || Array.isArray(body))
-      return json({ success: false, error: 'invalid body' }, 400);
+      return res.status(400).json({ success: false, error: 'invalid body' });
     const input = body as Record<string, unknown>;
     const id = input.id || `card_${Date.now()}`;
     if (typeof id !== 'string' || !validId(id) || id === 'latest')
-      return json({ success: false, error: 'invalid card id' }, 400);
-    const existing = (await readCard(id)) || {};
+      return res.status(400).json({ success: false, error: 'invalid card id' });
+    const existing = await readCard(id) || {};
     const card = { ...existing, ...input, id, updatedAt: Date.now() };
     if (JSON.stringify(card).length > 3_500_000)
-      return json({ success: false, error: 'card too large' }, 413);
+      return res.status(413).json({ success: false, error: 'card too large' });
     await writeCard(id, card);
     await writeCard('latest', card);
-    return json({ success: true, id, card });
+    return res.status(200).json({ success: true, id, card });
   } catch (error) {
     console.error('POST /api/cards failed:', error);
-    return json({ success: false, error: 'card storage failed' }, 500);
+    return res.status(500).json({ success: false, error: 'card storage failed' });
   }
 }
